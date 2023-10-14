@@ -1,0 +1,6 @@
+(library
+ (inline_tests)
+ (name ocaml_test_protocol)
+ (libraries angstrom cmdliner)
+ (preprocess
+  (pps ppx_expect ppx_inline_test ppx_deriving.show)))
