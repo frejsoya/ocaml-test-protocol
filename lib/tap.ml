@@ -54,7 +54,7 @@ module Parser = struct
       | `Unescaped, buf ->
           let s = Buffer.to_bytes buf |> String.of_bytes in
           Buffer.clear buf ; return s
-          (* return ("M=" ^ matched ^  ",S=" ^ s) *)
+      (* return ("M=" ^ matched ^  ",S=" ^ s) *)
       | `Escaped, buf ->
           (* Invalid state when ending parsing *)
           let msg =
@@ -93,6 +93,19 @@ module Parser = struct
 
   let description_end = function '#' -> true | '\n' -> true | _ -> false
 
+  let escaped_chars =
+    choice
+      [ (let+ _ = string "\\#" in
+         '#' )
+      ; (let+ _ = string "\\\\" in
+         '\\' ) ]
+
+  let _test_description_old =
+    let+ chars =
+      string " - " *> (many @@ choice [escaped_chars; not_char '#'])
+    in
+    chars |> List.to_seq |> String.of_seq
+
   let test_id = char ' ' *> digits
 
   let test_description =
@@ -101,6 +114,14 @@ module Parser = struct
   let test_directive = whitespace *> comment_to_eol
 
   let status_line =
+    let* status = status in
+    let* id = opt test_id in
+    let* description = opt test_description in
+    let* comment = opt test_directive in
+    (* return (status, id ,description,comment) *)
+    return (Test {status; id; description; comment})
+
+  let _status_line_old =
     lift4
       (fun status id description comment ->
         Test {status; id; description; comment} )
@@ -126,9 +147,11 @@ module Parser = struct
     | Some other ->
         fail (Printf.sprintf "Unknown char at pos ? %c" other)
     | None ->
-        fail "FIXME unexpected end of input"
+        fail "could not parse tap_line "
 
-  let tap = many (tap_line <?> "Parsing tap lines" <* end_of_line)
+  let tap =
+    many (tap_line <?> "Parsing tap line" <* end_of_line)
+    <?> "Pasing multiple tap lines"
 
   (* let body = many_till body end_of_input *)
   let read_all (str : string) =
@@ -137,8 +160,6 @@ module Parser = struct
         v
     | Error msg ->
         failwith msg
-
-  let tap = many (tap_line <* end_of_line)
 end
 
 let print_tap l = l |> show_tap |> print_endline
@@ -255,7 +276,7 @@ let%expect_test "multiline" =
 let%expect_test "escaping" =
   (* 1) Excaping works for '\\' and '\#'
      2) Only '\\' and '\#' are valid escape sequences *)
-  Parser.read_all "ok 1 - hello\#sharp #TODO: comment\n" |> print_tap ;
+  Parser.read_all "ok 1 - hello\\#sharp #TODO: comment\n" |> print_tap ;
   [%expect
     {|
     [Tap.Test {status = Tap.Ok; id = (Some 1);
@@ -267,8 +288,14 @@ let%expect_test "escaping" =
     [Tap.Test {status = Tap.Ok; id = (Some 1);
        description = (Some "hello\\sharp "); comment = (Some "TODO: comment")}
       ] |}] ;
-  match Parser.read_all "ok 1 - hello\\F #TODO: comment\n" with
-  | _ ->
-      failwith "unexcpected success"
-  | exception Failure msg ->
-      print_endline msg ; [%expect {| : unexpected escaping char |}]
+  (* Illegal escape *)
+  match
+    Angstrom.parse_string ~consume:Angstrom.Consume.All Parser.test_directive
+      "hello\\Xfoobar"
+  with
+  | Ok res ->
+      failwith @@ "unexcpected success:" ^ res
+  | Error err ->
+      failwith @@ "parser gave error" ^ err
+(* | exception Failure msg ->
+    print_endline msg ; [%expect {| |}] *)
