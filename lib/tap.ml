@@ -18,42 +18,50 @@ module Parser = struct
   open Angstrom
 
   module S = struct
-    type t = [`Unescaped | `Escaped | `Error of string]
+    type t = [`Unescaped | `Escaped]
 
-    let _comment =
-      let _term = '#' in
+    let unescaped terminal buf = function
+      | '\\' ->
+          Some (`Escaped, buf)
+      | c when terminal c ->
+          None (* Terminal *)
+      | c ->
+          Buffer.add_char buf c ;
+          Some (`Unescaped, buf)
+
+    let escaped terminal buf = function
+      | '\\' as c ->
+          Buffer.add_char buf c ;
+          Some (`Unescaped, buf)
+      | c when terminal c ->
+          Buffer.add_char buf c ;
+          Some (`Unescaped, buf)
+      | c ->
+          Buffer.add_char buf c (* For error message*) ;
+          None
+
+    let text terminal =
       let buf = Buffer.create 64 in
-      Angstrom.scan_state (`Unescaped, buf) (fun (state, buf) c ->
-          match (state, c) with
-          | `Error _, _ ->
-              None (* Exit early *)
-          | `Unescaped, '#' ->
-              None (* Terminal *)
-          | `Unescaped, '\\' ->
-              Some (`Escaped, buf)
-          | `Unescaped, c ->
-              Some
-                ( `Escaped
-                , let () = Buffer.add_char buf c in
-                  buf )
-          | `Escaped, '#' ->
-              Some
-                ( `Unescaped
-                , let () = Buffer.add_char buf c in
-                  buf )
-          | `Escaped, '\\' ->
-              Some
-                ( `Unescaped
-                , let () = Buffer.add_char buf c in
-                  buf )
-          | `Escaped, c ->
-              let err : t =
-                `Error
-                  (Printf.sprintf "invalid sequence: %s%c"
-                     (buf |> Buffer.to_bytes |> String.of_bytes)
-                     c )
-              in
-              Some (err, buf) )
+      let* (matched, state) : string * (t * Buffer.t) =
+        scan (`Unescaped, buf) (fun (state, buf) c ->
+            match (state, c) with
+            | `Unescaped, c ->
+                unescaped terminal buf c
+            | `Escaped, c ->
+                escaped terminal buf c )
+      in
+      match state with
+      | `Unescaped, buf ->
+          let s = Buffer.to_bytes buf |> String.of_bytes in
+          Buffer.clear buf ; return s
+          (* return ("M=" ^ matched ^  ",S=" ^ s) *)
+      | `Escaped, buf ->
+          (* Invalid state when ending parsing *)
+          let msg =
+            Printf.sprintf "invalid sequence: matched=%s buf=%s" matched
+              (buf |> Buffer.to_bytes |> String.of_bytes)
+          in
+          Buffer.clear buf ; fail msg
   end
 
   let is_digit = function '0' .. '9' -> true | _ -> false
@@ -87,7 +95,8 @@ module Parser = struct
 
   let test_id = char ' ' *> digits
 
-  let test_desc = string " - " *> take_till description_end
+  let test_description =
+    string " - " *> S.text description_end <?> "parsing test_description"
 
   let test_directive = whitespace *> comment_to_eol
 
@@ -97,7 +106,7 @@ module Parser = struct
         Test {status; id; description; comment} )
       status (* ok | not ok *)
       (opt test_id) (* digit *)
-      (opt test_desc) (* ' - ' text *)
+      (opt test_description) (* ' - ' text *)
       (opt test_directive)
   (*'# comment'*)
 
@@ -119,7 +128,7 @@ module Parser = struct
     | None ->
         fail "FIXME unexpected end of input"
 
-  let tap = many (tap_line <* end_of_line)
+  let tap = many (tap_line <?> "Parsing tap lines" <* end_of_line)
 
   (* let body = many_till body end_of_input *)
   let read_all (str : string) =
@@ -243,6 +252,23 @@ let%expect_test "multiline" =
       Tap.Test {status = Tap.Ok; id = None; description = None; comment = None};
       Tap.Test {status = Tap.Ok; id = None; description = None; comment = None}] |}]
 
-(* let%expect_test "escaping" = *)
-
-(* Parser.read_all "ok 1 - hello # todo" |> print_tap *)
+let%expect_test "escaping" =
+  (* 1) Excaping works for '\\' and '\#'
+     2) Only '\\' and '\#' are valid escape sequences *)
+  Parser.read_all "ok 1 - hello\#sharp #TODO: comment\n" |> print_tap ;
+  [%expect
+    {|
+    [Tap.Test {status = Tap.Ok; id = (Some 1);
+       description = (Some "hello#sharp "); comment = (Some "TODO: comment")}
+      ] |}] ;
+  Parser.read_all "ok 1 - hello\\\\sharp #TODO: comment\n" |> print_tap ;
+  [%expect
+    {|
+    [Tap.Test {status = Tap.Ok; id = (Some 1);
+       description = (Some "hello\\sharp "); comment = (Some "TODO: comment")}
+      ] |}] ;
+  match Parser.read_all "ok 1 - hello\\F #TODO: comment\n" with
+  | _ ->
+      failwith "unexcpected success"
+  | exception Failure msg ->
+      print_endline msg ; [%expect {| : unexpected escaping char |}]

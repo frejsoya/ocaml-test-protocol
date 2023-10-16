@@ -16,7 +16,12 @@ type tap_line =
 type tap = tap_line list
 [@@deriving show]
 
+
+
 module Parser : sig
+    module S :sig
+        val text : (char -> bool) -> string Angstrom.t
+    end
   val tap_line : tap_line Angstrom.t
   val tap : tap Angstrom.t
   val read_all : string -> tap
