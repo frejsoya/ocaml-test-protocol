@@ -42,7 +42,7 @@ module Parser = struct
 
     let text terminal =
       let buf = Buffer.create 64 in
-      let* (matched, state) : string * (t * Buffer.t) =
+      let* (matched, (state,buf)) : string * (t * Buffer.t) =
         scan (`Unescaped, buf) (fun (state, buf) c ->
             match (state, c) with
             | `Unescaped, c ->
@@ -50,18 +50,20 @@ module Parser = struct
             | `Escaped, c ->
                 escaped terminal buf c )
       in
-      match state with
-      | `Unescaped, buf ->
-          let s = Buffer.to_bytes buf |> String.of_bytes in
-          Buffer.clear buf ; return s
-      (* return ("M=" ^ matched ^  ",S=" ^ s) *)
-      | `Escaped, buf ->
+      let buf_str = Buffer.to_bytes buf |> String.of_bytes in
+      Buffer.clear buf;
+      match state,(String.trim matched) with
+      | (`Unescaped,"") ->
+          return None
+      | `Unescaped, _ ->
+          return  @@ Some buf_str
+      | `Escaped, matched ->
           (* Invalid state when ending parsing *)
           let msg =
-            Printf.sprintf "invalid sequence: matched=%s buf=%s" matched
-              (buf |> Buffer.to_bytes |> String.of_bytes)
+            let escape_char = String.get buf_str (String.length buf_str-1) in
+            Printf.sprintf "invalid escape char, %c, in string %s%c" escape_char matched escape_char
           in
-          Buffer.clear buf ; fail msg
+           fail msg
   end
 
   let is_digit = function '0' .. '9' -> true | _ -> false
@@ -98,38 +100,40 @@ module Parser = struct
       [ (let+ _ = string "\\#" in
          '#' )
       ; (let+ _ = string "\\\\" in
-         '\\' ) ]
+         '\\' )
+         ]
 
-  let _test_description_old =
-    let+ chars =
-      string " - " *> (many @@ choice [escaped_chars; not_char '#'])
-    in
-    chars |> List.to_seq |> String.of_seq
 
-  let test_id = char ' ' *> digits
+  let __test_description =
+    (* - Detect prefix it can be one or more spaces or ' - '
+       - Read the string until # or \n
+       - If empty => None.
+       - Must propagate failure.
+    *)
+
+    (* prefix can be a space or nothing *)
+    let* () = skip_while (fun c -> c == ' ' || c == '-') in
+    let+ comment = many @@ choice [escaped_chars; satisfy description_end] in
+    match List.is_empty comment with
+    | true ->
+        None
+    | false ->
+        comment |> List.to_seq |> String.of_seq |> Option.some
 
   let test_description =
-    string " - " *> S.text description_end <?> "parsing test_description"
+    let* _ = skip_while (fun c -> c == ' ' || c == '-') in
+     S.text description_end <?> "parsing test_description"
 
   let test_directive = whitespace *> comment_to_eol
 
   let status_line =
-    let* status = status in
-    let* id = opt test_id in
-    let* description = opt test_description in
-    let* comment = opt test_directive in
+    let id = opt @@ (char ' ' *> digits) in
+    let+ status = status
+    and+ id = id
+    and+ description = test_description
+    and+ comment = opt test_directive in
     (* return (status, id ,description,comment) *)
-    return (Test {status; id; description; comment})
-
-  let _status_line_old =
-    lift4
-      (fun status id description comment ->
-        Test {status; id; description; comment} )
-      status (* ok | not ok *)
-      (opt test_id) (* digit *)
-      (opt test_description) (* ' - ' text *)
-      (opt test_directive)
-  (*'# comment'*)
+    Test {status; id; description; comment}
 
   let tap_line =
     let* char = peek_char in
@@ -290,12 +294,14 @@ let%expect_test "escaping" =
       ] |}] ;
   (* Illegal escape *)
   match
-    Angstrom.parse_string ~consume:Angstrom.Consume.All Parser.test_directive
-      "hello\\Xfoobar"
+    Angstrom.parse_string ~consume:Angstrom.Consume.Prefix Parser.test_description
+      " hello\\xfoobar"
   with
   | Ok res ->
-      failwith @@ "unexcpected success:" ^ res
+      failwith @@ "ERROR unexpected success:"  ^ (Option.get res)
   | Error err ->
-      failwith @@ "parser gave error" ^ err
+      print_endline err;
+  [%expect {| parsing test_description: invalid escape char, x, in string hello\x |}]
+
 (* | exception Failure msg ->
     print_endline msg ; [%expect {| |}] *)
